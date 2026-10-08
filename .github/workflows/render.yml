@@ -1,0 +1,128 @@
+name: Render video
+
+# Renders this fframes project on a free GitHub runner and uploads the mp4 plus
+# review PNGs. Rendering happens here rather than locally because a full build
+# (including a static ffmpeg) needs gigabytes of disk.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: Draft render only (one scene, half resolution, fast preset)
+        type: boolean
+        default: false
+
+# Least privilege: this workflow only reads the repo and uploads artifacts.
+permissions:
+  contents: read
+
+# A render is minutes of CPU; never run two for the same ref at once.
+concurrency:
+  group: render-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  render:
+    # Free for public repositories. The CPU backend needs no GPU, so a plain
+    # runner is all this requires.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # ffmpeg-media links libav statically and builds x264/x265/vpx/opus from
+      # source, hence the assemblers and dev headers.
+      - name: Install system dependencies
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            yasm nasm nasm \
+            libx264-dev libx265-dev libopus-dev libvpx-dev \
+            clang libclang-dev \
+            ninja-build \
+            ffmpeg
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+
+      # Without this every push is a cold build, and the cold build is where the
+      # static ffmpeg lands.
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: ". -> target"
+          key: ${{ github.job }}
+          shared-key: fframes-render
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Timeline
+        run: ./target/release/demo timeline
+
+      # inspect reports missing media or fonts, text clipped by the canvas,
+      # invalid SVG and panics, and exits 2 when it finds any of them.
+      - name: Inspect every frame
+        run: |
+          set -euo pipefail
+          ./target/release/demo inspect
+
+      # A contact sheet is the cheapest way to see whether the motion works
+      # without watching the video. `strip` defaults to strip.png, `frame` to
+      # frames/; collect them under review/ so one artifact holds them all.
+      - name: Contact sheet
+        run: ./target/release/demo strip -n 12
+
+      # Full-size stills at the moments that matter.
+      - name: Still frames
+        run: ./target/release/demo frame 1s,50%,end
+
+      - name: Collect review images
+        run: |
+          set -euo pipefail
+          mkdir -p review
+          for f in strip.png frames onion.png; do
+            if [ -e "${f}" ]; then
+              mkdir -p "review/$(dirname "${f}")"
+              mv "${f}" "review/${f}"
+            fi
+          done
+          find review -type f | sort
+
+      - name: Upload review images
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: review-images
+          path: review/
+          retention-days: 14
+          if-no-files-found: error
+
+      # A full render of every scene at 1080p.
+      - name: Render
+        if: ${{ !inputs.draft }}
+        run: ./target/release/demo render
+
+      # One scene at half resolution with the fast preset: seconds, not minutes.
+      # Proves the encoder and the file writer work end to end.
+      - name: Draft render
+        if: ${{ inputs.draft }}
+        run: ./target/release/demo render --draft
+
+      - name: Upload video
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: video
+          path: out.mp4
+          retention-days: 14
+          if-no-files-found: error
