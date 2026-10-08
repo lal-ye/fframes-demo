@@ -3,6 +3,9 @@ name: Render video
 # Renders this fframes project on a free GitHub runner and uploads the mp4 plus
 # review PNGs. Rendering happens here rather than locally because a full build
 # (including a static ffmpeg) needs gigabytes of disk.
+#
+# The binary name is discovered from Cargo.toml rather than hardcoded, so this
+# file works unchanged in any fframes project.
 on:
   push:
     branches: [main]
@@ -11,6 +14,10 @@ on:
     inputs:
       draft:
         description: Draft render only (one scene, half resolution, fast preset)
+        type: boolean
+        default: false
+      skip_render:
+        description: Review PNGs only (skip the mp4 encode)
         type: boolean
         default: false
 
@@ -90,28 +97,41 @@ jobs:
           key: ${{ github.job }}
           shared-key: fframes-render
 
+      # Read the binary name from the manifest so the rest of the workflow is
+      # project-agnostic. CARGO_PKG_NAME and the default bin target agree for the
+      # single-binary projects cargo fframes new generates.
+      - name: Resolve binary name
+        id: bin
+        run: |
+          set -euo pipefail
+          NAME="$(awk -F'"' '/^\[package\]/{f=1} f && /^name[[:space:]]*=/{print $2; exit}' Cargo.toml)"
+          if [ -z "${NAME}" ]; then
+            echo "::error::no [package] name in Cargo.toml"
+            exit 1
+          fi
+          echo "name=${NAME}" >> "${GITHUB_OUTPUT}"
+          echo "Using binary: ${NAME}"
+
       - name: Build
         run: cargo build --release --locked
 
       - name: Timeline
-        run: ./target/release/demo timeline
+        run: "./target/release/${{ steps.bin.outputs.name }} timeline"
 
       # inspect reports missing media or fonts, text clipped by the canvas,
       # invalid SVG and panics, and exits 2 when it finds any of them.
       - name: Inspect every frame
-        run: |
-          set -euo pipefail
-          ./target/release/demo inspect
+        run: "./target/release/${{ steps.bin.outputs.name }} inspect"
 
       # A contact sheet is the cheapest way to see whether the motion works
       # without watching the video. `strip` defaults to strip.png, `frame` to
       # frames/; collect them under review/ so one artifact holds them all.
       - name: Contact sheet
-        run: ./target/release/demo strip -n 12
+        run: "./target/release/${{ steps.bin.outputs.name }} strip -n 12"
 
       # Full-size stills at the moments that matter.
       - name: Still frames
-        run: ./target/release/demo frame 1s,50%,end
+        run: "./target/release/${{ steps.bin.outputs.name }} frame 1s,50%,end"
 
       - name: Collect review images
         run: |
@@ -135,16 +155,17 @@ jobs:
 
       # A full render of every scene at 1080p.
       - name: Render
-        if: ${{ !inputs.draft }}
-        run: ./target/release/demo render
+        if: ${{ !inputs.draft && !inputs.skip_render }}
+        run: "./target/release/${{ steps.bin.outputs.name }} render"
 
       # One scene at half resolution with the fast preset: seconds, not minutes.
       # Proves the encoder and the file writer work end to end.
       - name: Draft render
-        if: ${{ inputs.draft }}
-        run: ./target/release/demo render --draft
+        if: ${{ inputs.draft && !inputs.skip_render }}
+        run: "./target/release/${{ steps.bin.outputs.name }} render --draft"
 
       - name: Upload video
+        if: ${{ !inputs.skip_render }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: video
