@@ -27,6 +27,21 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "1"
+  # ffmpeg-sys-fframes downloads a prebuilt static FFmpeg for Linux x86_64, but
+  # that archive links x264/x265 dynamically and records the -L paths of the
+  # machine that built it. Those paths do not exist on a runner, so build.rs
+  # falls back to pkg-config and picks up the runner's system x264 -- which is
+  # a different ABI than the prebuilt's libavcodec was compiled against
+  # (prebuilt wants x264_encoder_open_163, Ubuntu 24.04 ships 164), and the
+  # final link fails with "undefined symbol: x264_encoder_open_163".
+  # Building FFmpeg from source makes x264 come from the same bundled sources
+  # as libavcodec, so the pair always matches whatever the runner is.
+  FFMPEG_FORCE_BUILD: "1"
+  # A source build otherwise gets -march=native, and rust-cache would then
+  # restore artifacts built on a different runner's CPU, which can SIGILL.
+  # Pin a portable baseline instead.
+  FFMPEG_MARCH: "x86-64"
+  FFMPEG_MTUNE: "generic"
 
 jobs:
   render:
@@ -39,19 +54,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # ffmpeg-media links libav statically and builds x264/x265/vpx/opus from
-      # source, hence the assemblers and dev headers.
+      # FFmpeg is compiled from source here (see the FFMPEG_* env vars), which
+      # is why the assemblers and dev headers are needed.
       - name: Install system dependencies
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            yasm nasm nasm \
-            libx264-dev libx265-dev libopus-dev libvpx-dev \
+            yasm nasm \
             clang libclang-dev \
             ninja-build \
-            ffmpeg
+            pkg-config
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
